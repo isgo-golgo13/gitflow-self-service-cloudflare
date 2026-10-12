@@ -1,0 +1,15 @@
+name: CI Dry-Run 
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['envs/**']
+  push:
+    branches: [main]
+    paths: ['envs/**']
+
+
+
+permissions:
+  contents: read
+  pull-requests: write
