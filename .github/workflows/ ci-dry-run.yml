@@ -1,5 +1,9 @@
-name: CI Dry-Run 
+name: CI Dry-Run
 
+# Safe simulation of the edge-factory pipeline: changes -> dryrun (PR) -> run (merge, per environment,
+# gated by the matching GitHub Environment) -> restore (button). Every step only echoes.
+# No Cloudflare token, no OpenTofu, no runner VM: GitHub-hosted Ubuntu runners only.
+# The environment list is derived from envs/<name>/ - whatever directories exist (nonprod, uat, prod ...).
 on:
   pull_request:
     branches: [main]
@@ -7,9 +11,97 @@ on:
   push:
     branches: [main]
     paths: ['envs/**']
-
-
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: environment to simulate a restore for (a directory under envs/)
+        type: string
+        required: true
+        default: nonprod
 
 permissions:
   contents: read
   pull-requests: write
+
+jobs:
+  changes:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      envs: ${{ steps.pick.outputs.envs }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with: { fetch-depth: 0 }
+      - id: pick
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          # first push to a new repo has no 'before'; fall back to everything in envs/
+          if git cat-file -e "$base" 2>/dev/null; then files=$(git diff --name-only "$base" "${{ github.sha }}"); else files=$(git ls-files envs); fi
+          envs=$(echo "$files" | grep -oE '^envs/[^/]+/' | cut -d/ -f2 | sort -u | jq -R . | jq -sc .)
+          echo "envs=$envs" >> "$GITHUB_OUTPUT"
+          { echo "## changes"; echo; echo '```'; echo "$files"; echo '```'; echo "environments affected: \`$envs\`"; } >> "$GITHUB_STEP_SUMMARY"
+
+  dryrun:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.envs != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJSON(needs.changes.outputs.envs) }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Validate (simulated)
+        run: echo "would run tofu fmt -check, tofu validate, tflint, checkov - 0 findings (simulated)"
+      - name: Dry run (${{ matrix.env }}) - simulated plan
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          {
+            echo "### dry run · ${{ matrix.env }} (simulated)"
+            echo
+            echo "desired state in envs/${{ matrix.env }}/app-stack.json:"
+            echo '```json'; cat "envs/${{ matrix.env }}/app-stack.json" 2>/dev/null || echo '{}'; echo '```'
+            echo "Plan: 0 to add, 1 to change, 0 to destroy.  (simulated - nothing was touched)"
+          } | tee "artifacts/dryrun-${{ matrix.env }}.md"
+          cat "artifacts/dryrun-${{ matrix.env }}.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Post the dry run on the pull request
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: gh pr comment ${{ github.event.pull_request.number }} --body-file artifacts/dryrun-${{ matrix.env }}.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with: { name: 'dryrun-${{ matrix.env }}-${{ github.run_id }}', path: artifacts/, retention-days: 3 }
+
+  run:
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.envs != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        env: ${{ fromJSON(needs.changes.outputs.envs) }}
+    environment: ${{ matrix.env }}   # a GitHub Environment of the same name; prod's required reviewers gate it
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Apply (${{ matrix.env }}) - simulated
+        shell: bash
+        run: |
+          {
+            echo "## run · ${{ matrix.env }} (simulated)"
+            echo
+            echo "would apply envs/${{ matrix.env }}/app-stack.json with the ${{ matrix.env }} Cloudflare token"
+            echo "changed  <hostname>  (simulated - nothing was touched)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "simulated apply for ${{ matrix.env }} - no Cloudflare contact"
+
+  restore:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ${{ inputs.environment }}
+    steps:
+      - run: echo "would re-apply envs/${{ inputs.environment }}/app-stack.json (simulated)" | tee -a "$GITHUB_STEP_SUMMARY"

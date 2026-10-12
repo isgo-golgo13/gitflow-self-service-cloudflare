@@ -1,0 +1,10 @@
+{
+  "name": "billing-api",
+  "zone": "dronegrid.io",
+  "hostname": "billing-nonprod",
+  "tier": "small",
+  "exposure": "private",
+  "database": "d1",
+  "objects": true,
+  "container": false
+}
